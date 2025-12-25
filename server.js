@@ -11,46 +11,66 @@ const Audit = require("./models/Audit");
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
-/* -------------------- MONGODB -------------------- */
-const MONGODB_URI =
-  process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/pdf_audit";
+/* ===================== ENV CHECK ===================== */
+if (!process.env.MONGODB_URI) {
+  throw new Error("❌ MONGODB_URI not set");
+}
 
+if (!process.env.BASE_URL) {
+  throw new Error("❌ BASE_URL not set");
+}
+
+const BASE_URL = process.env.BASE_URL;
+
+/* ===================== MONGODB ===================== */
 mongoose
-  .connect(MONGODB_URI)
+  .connect(process.env.MONGODB_URI)
   .then(() => console.log("✅ MongoDB connected"))
   .catch(err => {
     console.error("❌ MongoDB connection error:", err);
     process.exit(1);
   });
 
-app.use(cors());
+/* ===================== MIDDLEWARE ===================== */
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",
+      "https://signature-engine-frontend-theta.vercel.app",
+      "https://signature-engine-frontend-4djgs54ek.vercel.app",
+    ],
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type"],
+  })
+);
+
 app.use(express.json({ limit: "25mb" }));
-app.use("/files", express.static(path.join(__dirname, "uploads")));
 
-/* -------------------- DIRECTORIES -------------------- */
-const ORIGINAL_DIR = path.join(__dirname, "uploads", "original");
-const SIGNED_DIR = path.join(__dirname, "uploads", "signed");
+/* ===================== DIRECTORIES ===================== */
+const UPLOAD_DIR = path.join(__dirname, "uploads");
+const ORIGINAL_DIR = path.join(UPLOAD_DIR, "original");
+const SIGNED_DIR = path.join(UPLOAD_DIR, "signed");
 
-[ORIGINAL_DIR, SIGNED_DIR].forEach(dir => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-});
-
-/* -------------------- HASH FUNCTION -------------------- */
-function sha256(buffer) {
-  return crypto.createHash("sha256").update(buffer).digest("hex");
-}
-
-[ORIGINAL_DIR, SIGNED_DIR].forEach(dir => {
+[UPLOAD_DIR, ORIGINAL_DIR, SIGNED_DIR].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
 });
 
-/* -------------------- UPLOAD PDF -------------------- */
+app.use("/files", express.static(UPLOAD_DIR));
+
+/* ===================== UTILS ===================== */
+function sha256(buffer) {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+/* ===================== ROUTES ===================== */
+
+/* ---------- UPLOAD PDF ---------- */
 app.post("/upload-pdf", upload.single("pdf"), (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
+      return res.status(400).json({ error: "No PDF uploaded" });
     }
 
     const pdfId = Date.now().toString();
@@ -60,7 +80,7 @@ app.post("/upload-pdf", upload.single("pdf"), (req, res) => {
 
     res.json({
       pdfId,
-      url: `http://localhost:5000/files/original/${pdfId}.pdf`,
+      url: `${BASE_URL}/files/original/${pdfId}.pdf`,
     });
   } catch (err) {
     console.error(err);
@@ -68,7 +88,7 @@ app.post("/upload-pdf", upload.single("pdf"), (req, res) => {
   }
 });
 
-/* -------------------- FINALIZE PDF + AUDIT -------------------- */
+/* ---------- FINALIZE PDF + AUDIT ---------- */
 app.post("/finalize-pdf", async (req, res) => {
   try {
     const { pdfId, fields } = req.body;
@@ -78,7 +98,7 @@ app.post("/finalize-pdf", async (req, res) => {
       return res.status(404).json({ error: "PDF not found" });
     }
 
-    /* ---------- HASH BEFORE ---------- */
+    /* ----- HASH BEFORE ----- */
     const originalBytes = fs.readFileSync(originalPath);
     const originalHash = sha256(originalBytes);
 
@@ -90,11 +110,13 @@ app.post("/finalize-pdf", async (req, res) => {
       if (!page) continue;
 
       const { width, height } = page.getSize();
+
       const x = field.xRatio * width;
       const y = height - field.yRatio * height - field.hRatio * height;
       const w = field.wRatio * width;
       const h = field.hRatio * height;
 
+      /* ----- TEXT / DATE ----- */
       if ((field.type === "text" || field.type === "date") && field.value) {
         page.drawText(field.value, {
           x,
@@ -104,6 +126,7 @@ app.post("/finalize-pdf", async (req, res) => {
         });
       }
 
+      /* ----- SIGNATURE ----- */
       if (field.type === "signature" && field.value) {
         const imgBytes = Buffer.from(
           field.value.replace(/^data:image\/\w+;base64,/, ""),
@@ -127,22 +150,23 @@ app.post("/finalize-pdf", async (req, res) => {
       }
     }
 
-    /* ---------- HASH AFTER ---------- */
+    /* ----- HASH AFTER ----- */
     const finalPdf = await pdfDoc.save();
     const finalHash = sha256(finalPdf);
 
     const outputPath = path.join(SIGNED_DIR, `${pdfId}-final.pdf`);
     fs.writeFileSync(outputPath, finalPdf);
 
-    /* ---------- STORE AUDIT ---------- */
+    /* ----- AUDIT STORE ----- */
     await Audit.create({
       pdfId,
       originalHash,
       finalHash,
+      createdAt: new Date(),
     });
 
     res.json({
-      url: `http://localhost:5000/files/signed/${pdfId}-final.pdf`,
+      url: `${BASE_URL}/files/signed/${pdfId}-final.pdf`,
       audit: {
         originalHash,
         finalHash,
@@ -154,6 +178,9 @@ app.post("/finalize-pdf", async (req, res) => {
   }
 });
 
-app.listen(5000, () => {
-  console.log("✅ Backend running at http://localhost:5000");
+/* ===================== START SERVER ===================== */
+const PORT = process.env.PORT || 5000;
+
+app.listen(PORT, () => {
+  console.log(`✅ Backend running on port ${PORT}`);
 });
