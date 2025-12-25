@@ -12,12 +12,16 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 /* -------------------- MONGODB -------------------- */
-mongoose.connect("mongodb://127.0.0.1:27017/pdf_audit", {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log("✅ MongoDB connected"))
-.catch(err => console.error(err));
+const MONGODB_URI =
+  process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/pdf_audit";
+
+mongoose
+  .connect(MONGODB_URI)
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch(err => {
+    console.error("❌ MongoDB connection error:", err);
+    process.exit(1);
+  });
 
 app.use(cors());
 app.use(express.json({ limit: "25mb" }));
